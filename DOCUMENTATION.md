@@ -1,49 +1,27 @@
-# 🐻 BearBridge — Dokumentasi Integrasi & Panduan Penggunaan
+# BearBridge - Catetan Integrasi (Web sama Server)
 
-**BearBridge** adalah sistem *Cross-Server Command Dispatch Bridge* untuk **BearCraft Network**. Plugin ini menjembatani transaksi dari **Web Store (Payment Gateway)** langsung ke dalam server **Minecraft (Paper/Purpur)** secara otomatis, aman (*atomic lock*), dan *real-time*.
+Catetan buat integrasi backend webstore (Node.js / Express 5) ke server menkrep pake plugin **BearBridge**.
+Ini bukan tipe plugin plug and play yang tinggal taro langsung jalan sendiri tanpa backend ya, jadi pastiin dari sisi web sama database udah disiapin sama alur di bawah.
 
-* **Lead Developer:** Yonyon (Discord: `iyonhungkul`)
-* **Dedicated To:** VLADMXIV (BearCraft Network)
-* **Database Host Terkunci:** `dbbb.beruang.my.id`
-* **Nama Database Terkunci:** `bearcraft_store`
-
----
-
-## Daftar Isi
-1. [Arsitektur Alur Kerja (Workflow)](#1-arsitektur-alur-kerja-workflow)
-2. [Panduan untuk Web Developer (Integrasi Web Store)](#2-panduan-untuk-web-developer-integrasi-web-store)
-   - [Skema Tabel Database (`pending_commands`)](#21-skema-tabel-database-pending_commands)
-   - [Cara Menyuntikkan Pesanan (INSERT Query)](#22-cara-menyuntikkan-pesanan-insert-query)
-   - [Aturan Penulisan Command & Multi-Command](#23-aturan-penulisan-command--multi-command)
-   - [Contoh Implementasi Kode (PHP / Node.js)](#24-contoh-implementasi-kode-php--nodejs)
-   - [Memantau Status Pesanan dari Web](#25-memantau-status-pesanan-dari-web)
-3. [Panduan untuk Server Developer / Admin Minecraft](#3-panduan-untuk-server-developer--admin-minecraft)
-   - [Instalasi & Setup Awal (Standby Mode)](#31-instalasi--setup-awal-standby-mode)
-   - [Konfigurasi Multi-Server (`target-server`)](#32-konfigurasi-multi-server-target-server)
-   - [Daftar Perintah In-Game & Console (`/bb`)](#33-daftar-perintah-in-game--console-bb)
-   - [Kustomisasi Pesan, Efek In-Game, & Discord Webhook](#34-kustomisasi-pesan-efek-in-game--discord-webhook)
-   - [Cara Update Plugin (`/bb update`)](#35-cara-update-plugin-bb-update)
+Info DB yang udah ku lock di dalem plugin:
+* Host DB: `dbbb.beruang.my.id` (MariaDB / MySQL, pastiin port DB nya ke open biar bisa diakses dari luar / cPanel sama server menkrep)
+* Nama Database: `bearcraft_store`
+* Tabel Antrian: `pending_commands` (tabelnya otomatis ke create pas plugin pertama kali konek ke DB)
 
 ---
 
-## 1. Arsitektur Alur Kerja (Workflow)
+## 1. Buat Web Dev (Backend Express.js + Duitku)
 
-1. **Pembelian di Web Store:** Pemain membeli item/rank di website dan pembayaran terverifikasi (misal via Midtrans/Xendit/Tripay/Duitku).
-2. **Insert ke Database:** Backend Web Store melakukan `INSERT` baris baru ke tabel `pending_commands` di database `bearcraft_store` dengan status `'PENDING'`.
-3. **Deteksi Otomatis oleh BearBridge:**
-   * **Jika Pemain Sedang Online:** Dalam hitungan detik (default setiap `3 detik`), BearBridge mendeteksi pesanan tersebut, mengunci statusnya menjadi `'PROCESSING'`, lalu mengeksekusi command di Console dan memunculkan efek selebrasi (Title, Sound, Broadcast, Discord Webhook).
-   * **Jika Pemain Sedang Offline:** Pesanan akan tetap tersimpan aman di database dengan status `'PENDING'`. Begitu pemain tersebut masuk ke dalam server (`PlayerJoinEvent`), BearBridge otomatis langsung mengeksekusi pesanannya setelah 1 detik pemain *login*.
-4. **Finalisasi Status:** Setelah dieksekusi, status pesanan otomatis berubah menjadi `'SUCCESS'` (atau `'FAILED'` beserta pesan error-nya jika ada kendala).
+Sistemnya searah buat trigger command dari webstore ke menkrep lewat tabel antrian database (decoupled). Jadi backend Express di cPanel ga perlu ribet nembak RCON atau buka port tambahan di tiap sub server menkrep.
 
----
+Alurnya simpel:
+1. Player bayar via Duitku.
+2. Duitku nembak endpoint callback di backend Express lu.
+3. Backend validasi signature terus cek `resultCode === '00'` (pastiin ada if condition biar ga tembus / double insert).
+4. Kalau lunas, backend tinggal `INSERT` 1 baris ke tabel `pending_commands` pake status `'PENDING'`.
+5. Sisanya plugin BearBridge di dalem server menkrep yang bakal narik data itu terus eksekusi command nya di console.
 
-## 2. Panduan untuk Web Developer (Integrasi Web Store)
-
-Bagian ini ditujukan bagi Web Developer yang mengelola backend toko/payment webhook BearCraft.
-
-### 2.1. Skema Tabel Database (`pending_commands`)
-Tabel `pending_commands` akan dibuat secara otomatis oleh plugin BearBridge saat pertama kali terhubung ke database `bearcraft_store`. Berikut adalah strukturnya:
-
+### Struktur Tabel `pending_commands`
 ```sql
 CREATE TABLE IF NOT EXISTS `pending_commands` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -60,238 +38,139 @@ CREATE TABLE IF NOT EXISTS `pending_commands` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-### 2.2. Cara Menyuntikkan Pesanan (INSERT Query)
-Saat callback/webhook pembayaran dari payment gateway menyatakan **LUNAS (PAID/SETTLEMENT)**, backend website cukup menjalankan query `INSERT` ke3 kolom utama berikut (`player_name`, `command`, `target_server`):
-
-```sql
-INSERT INTO `pending_commands` (`player_name`, `command`, `target_server`, `status`)
-VALUES ('NamaPemain', 'lp user %player% parent add vip', 'survival', 'PENDING');
-```
-
-#### Penjelasan Kolom Wajib:
-| Kolom | Tipe | Penjelasan |
-| :--- | :--- | :--- |
-| `player_name` | `VARCHAR(32)` | Username Minecraft pembeli (Case-insensitive saat pencarian online, namun disarankan sesuai input pemain). |
-| `command` | `TEXT` | Perintah console yang akan dijalankan (tanpa `/` di depan, meskipun jika ada `/` otomatis dibersihkan oleh plugin). |
-| `target_server` | `VARCHAR(32)` | ID server tujuan (misal: `'survival'`, `'skyblock'`, `'lobby'`). **Harus sama persis** dengan `server.target-server` di `config.yml` pada server Minecraft tujuan. |
-| `status` | `ENUM` | Biarkan default `'PENDING'` saat baru dibuat. |
+### Aturan Kolom pas `INSERT` dari Web
+* **`player_name`**: Nickname menkrep player yang beli.
+* **`command`**: Command console yang mau dijalanin (ga usah pake `/` di depan).
+  * Bisa langsung masukin nick player nya, atau tulis `%player%` (nanti di replace otomatis sama plugin).
+  * Kalau 1 paket pembelian isinya banyak command (misal dapet rank + eco + crate key), gabungin aja pake titik koma (`;`):
+    ```text
+    lp user %player% parent add mvp; eco give %player% 250000; crate key give %player% mythic 2
+    ```
+* **`target_server`**: Nama gamemode tujuan (contoh: `survival`, `skyblock`, `war`).
+  * **Penting:** Karena tiap gamemode rank nya beda, string ini wajib sama persis kayak settingan `target-server` di `config.yml` plugin pada sub server tersebut.
+* **`status`**: Isi `'PENDING'`.
+  * Kalau anaknya lagi online di gamemode itu, paling ~3 detik langsung masuk.
+  * Kalau anaknya lagi offline, datanya aman nunggu di DB, begitu dia join server langsung otomatis ke claim.
 
 ---
 
-### 2.3. Aturan Penulisan Command & Multi-Command
+### Contoh Code di Express.js (Node.js 22+)
 
-1. **Mendukung Placeholder `%player%` atau `{player}`:**
-   * Anda boleh menyuntikkan nama pemain secara langsung (`lp user Budi parent add vip`) **ATAU** menggunakan placeholder (`lp user %player% parent add vip`). Plugin akan otomatis mengganti `%player%` dan `{player}` dengan isi kolom `player_name`.
-2. **Tanpa Garis Miring (`/`) di Awal:**
-   * Tulis perintah sebagaimana diketik di Console (contoh: `eco give %player% 50000`). Jika terlanjur menggunakan `/` di awal (`/eco give...`), BearBridge tetap akan membersihkannya secara otomatis.
-3. **Eksekusi Banyak Command Sekaligus (Multi-Command dengan `;`):**
-   * Jika 1 paket pembelian di web berisi beberapa hadiah sekaligus (misal: dapat Rank + Uang + Key Crate), Anda **tidak perlu** membuat banyak baris di database. Cukup pisahkan dengan tanda titik koma (`;`) dalam satu kolom `command`:
-   ```text
-   lp user %player% parent add mvp; eco give %player% 100000; crate key give %player% legendary 3
-   ```
-4. **Deteksi Otomatis Rank (LuckPerms Integration):**
-   * Jika command mengandung pola `parent add <rank>`, `parent set <rank>`, `group add <rank>`, atau `group set <rank>`, BearBridge otomatis mengenali nama rank tersebut untuk ditampilkan pada pengumuman *Broadcast*, *Console Log*, dan *Discord Webhook* (Perubahan dari Rank Lama $\rightarrow$ Rank Baru).
-
----
-
-### 2.4. Contoh Implementasi Kode (Express.js / Node.js)
-
-Berikut adalah contoh struktur siap pakai untuk backend **Express.js** menggunakan library `mysql2`:
-
-#### 1. Instalasi Package
 ```bash
-npm install express mysql2 dotenv
+npm install mysql2
 ```
 
-#### 2. Konfigurasi Database Pool (`db.js`)
+**`database/bearbridge.js`**
 ```javascript
-const mysql = require('mysql2/promise');
-require('dotenv').config();
+import mysql from 'mysql2/promise';
 
-const bearBridgePool = mysql.createPool({
+export const bridgePool = mysql.createPool({
   host: 'dbbb.beruang.my.id',
   port: 3306,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: 'bearcraft_store',
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  connectionLimit: 10
 });
 
-/**
- * Fungsi helper untuk mengirim command ke antrian BearBridge
- * @param {string} playerName - Username Minecraft pembeli
- * @param {string|string[]} commands - String command atau Array berisi banyak command
- * @param {string} targetServer - Server tujuan (contoh: 'survival', 'skyblock')
- */
-async function dispatchToMinecraft(playerName, commands, targetServer = 'survival') {
-  // Jika dikirim dalam bentuk Array, gabungkan otomatis dengan '; '
-  const finalCommand = Array.isArray(commands) ? commands.join('; ') : commands;
+export async function pushOrderToBridge(playerName, commands, targetServer = 'survival') {
+  if (!playerName || !commands) {
+    throw new Error('playerName sama commands wajib diisi');
+  }
 
-  const [result] = await bearBridgePool.execute(
+  // Kalau dikirim array, otomatis digabung pake ';'
+  const cmdPayload = Array.isArray(commands) ? commands.join('; ') : commands;
+
+  const [result] = await bridgePool.execute(
     'INSERT INTO `pending_commands` (`player_name`, `command`, `target_server`, `status`) VALUES (?, ?, ?, ?)',
-    [playerName.trim(), finalCommand, targetServer.toLowerCase(), 'PENDING']
+    [playerName.trim(), cmdPayload, targetServer.toLowerCase(), 'PENDING']
   );
 
-  return result.insertId; // Mengembalikan Order ID di BearBridge
+  return result.insertId;
 }
-
-module.exports = { bearBridgePool, dispatchToMinecraft };
 ```
 
-#### 3. Contoh Endpoint di Express.js (`app.js` / `routes/webhook.js`)
+**`routes/payment.js` (Contoh Handler Callback Duitku)**
 ```javascript
-const express = require('express');
-const { bearBridgePool, dispatchToMinecraft } = require('./db');
+import express from 'express';
+import { bridgePool, pushOrderToBridge } from '../database/bearbridge.js';
 
-const app = express();
-app.use(express.json());
+const router = express.Router();
 
-/**
- * 1. ENDPOINT CALLBACK PAYMENT GATEWAY (Midtrans / Tripay / Xendit / Duitku)
- * Dipanggil otomatis saat pembayaran berstatus PAID / SETTLEMENT
- */
-app.post('/api/payment/callback', async (req, res) => {
+router.post('/duitku/callback', async (req, res) => {
   try {
-    const { status, player_name, package_commands, server_mode } = req.body;
+    const { resultCode, merchantOrderId, player_name, commands, gamemode } = req.body;
 
-    // Pastikan hanya mengeksekusi jika pembayaran sudah LUNAS
-    if (status !== 'PAID' && status !== 'SETTLEMENT') {
-      return res.status(200).json({ message: 'Ignored: Payment not settled yet' });
+    // Pastiin ada if condition validasi transaksi sukses ('00') + cek signature Duitku lu
+    if (resultCode !== '00') {
+      return res.status(200).send('OK');
     }
 
-    // Contoh: package_commands bisa berupa string tunggal atau array multi-command:
-    // ["lp user %player% parent add mvp", "eco give %player% 250000", "crate key give %player% mythic 2"]
-    const orderId = await dispatchToMinecraft(
-      player_name,
-      package_commands,
-      server_mode || 'survival'
-    );
+    // Contoh commands: "lp user %player% parent add vip; eco give %player% 50000"
+    // Contoh gamemode: "survival" / "skyblock" / "war"
+    const orderId = await pushOrderToBridge(player_name, commands, gamemode);
 
-    return res.status(200).json({
-      success: true,
-      message: 'Command queued to BearBridge',
-      bearbridge_order_id: orderId
-    });
-  } catch (error) {
-    console.error('[BearBridge Webhook Error]:', error);
-    return res.status(500).json({ success: false, error: 'Database insert failed' });
+    return res.status(200).json({ status: 'queued', bridge_order_id: orderId });
+  } catch (err) {
+    console.error('[BearBridge Error]:', err);
+    return res.status(500).json({ error: 'Database insert error' });
   }
 });
 
-/**
- * 2. ENDPOINT CEK STATUS PESANAN (Opsional untuk halaman Invoice / Status di Web)
- * GET /api/order-status/:id
- */
-app.get('/api/order-status/:id', async (req, res) => {
+// Kalau di web mau nampilin status order udah masuk ke in game atau belum
+router.get('/order-status/:id', async (req, res) => {
   try {
-    const [rows] = await bearBridgePool.execute(
+    const [rows] = await bridgePool.execute(
       'SELECT `id`, `player_name`, `target_server`, `status`, `created_at`, `executed_at`, `error_message` FROM `pending_commands` WHERE `id` = ?',
       [req.params.id]
     );
 
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: rows[0]
-    });
-  } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
+    if (!rows.length) return res.status(404).json({ error: 'Order not found' });
+    return res.json(rows[0]);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(3000, () => console.log('Store Backend running on port 3000'));
+export default router;
 ```
 
 ---
 
-### 2.5. Memantau Status Pesanan dari Web
-Jika halaman *Riwayat Pembelian* atau *Admin Panel* di Website ingin menampilkan status apakah item sudah masuk ke dalam game atau belum, Web Developer cukup membaca kolom berikut pada tabel `pending_commands`:
-* `status = 'PENDING'` $\rightarrow$ Menunggu pemain online di server tujuan.
-* `status = 'PROCESSING'` $\rightarrow$ Sedang dieksekusi di dalam server.
-* `status = 'SUCCESS'` $\rightarrow$ Sudah berhasil diterima pemain pada waktu `executed_at`.
-* `status = 'FAILED'` $\rightarrow$ Gagal dieksekusi (lihat penyebabnya di kolom `error_message`).
+## 2. Buat Setup di Server Menkrep (Vlad)
 
----
-
-## 3. Panduan untuk Server Developer / Admin Minecraft
-
-Bagian ini ditujukan bagi Developer/Admin yang memasang plugin `BearBridge.jar` di server Minecraft.
-
-### 3.1. Instalasi & Setup Awal (Standby Mode)
-1. Masukkan file **`BearBridge.jar`** ke dalam folder `plugins/` di server Paper/Purpur Anda.
-2. Nyalakan server.
-3. Saat pertama kali dijalankan, karena kredensial database belum diisi, plugin **tidak akan crash/mati**, melainkan masuk ke **Standby Mode** dan menampilkan instruksi di Console:
-   ```text
-   ------ ʙᴇᴀʀʙʀɪᴅɢᴇ ꜱʏꜱᴛᴇᴍ - ꜱᴛᴀɴᴅʙʏ ᴍᴏᴅᴇ ------
-   ᴍᴏᴅᴇ: ꜱᴜʀᴠɪᴠᴀʟ  ▪  ᴅᴀᴛᴀʙᴀꜱᴇ: [ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ]  ▪  ꜱᴛᴀᴛᴜꜱ: [ꜱᴛᴀɴᴅʙʏ]
-   ⚠ Kredensial Database belum diatur di dalam konfigurasi!
-   ▪ Buka file: plugins/BearBridge/config.yml
-   ▪ Isi bagian database.username dan database.password sesuai kredensial server.
-   ▪ Setelah disimpan, cukup ketik /bb reload (tanpa perlu restart server).
-   ```
-4. Buka file `plugins/BearBridge/config.yml`, lalu isi `username` dan `password` database Anda:
+### Cara Pasang sama Konfigurasi
+1. Taro `BearBridge.jar` di folder `plugins/` tiap sub server (Survival, Skyblock, War, dst), tinggal idupin server.
+2. Pas pertama kali idup, karena user/pass DB belum lu isi, pluginnya **ga bakal matiin diri/error**, tapi masuk ke **Standby Mode** (ada infonya di console).
+3. Buka `plugins/BearBridge/config.yml`:
    ```yaml
    server:
+     # Sesuaikan sama nama sub servernya (survival / skyblock / war)
      target-server: "survival"
      poll-interval-seconds: 3
 
    database:
-     username: "user_db_anda"
-     password: "password_db_anda"
+     username: "user_db_lu"
+     password: "password_db_lu"
      port: 3306
    ```
-5. Simpan file `config.yml`, lalu ketik **`/bb reload`** di Console atau In-Game. Plugin akan langsung terhubung ke database dan mulai memproses antrian tanpa perlu restart server!
+4. Abis di save, ga perlu restart server, langsung ketik **`/bb reload`** di console atau in game. Kalau user/pass DB bener, dia langsung konek terus mulai narik antrian.
 
----
+*(Catetan: Walaupun tiap gamemode punya database sendiri buat data in game nya, khusus buat BearBridge ini semuanya konekin ke satu database `bearcraft_store` yang sama. Nanti pemisahan item/rank tiap servernya udah otomatis kefilter dari `target-server`).*
 
-### 3.2. Konfigurasi Multi-Server (`target-server`)
-Jika jaringan BearCraft memiliki banyak sub-server (misalnya: **Survival**, **Skyblock**, **OneBlock**):
-* Pasang `BearBridge.jar` di masing-masing sub-server tersebut.
-* Pada server Survival, atur `target-server: "survival"` di `config.yml`.
-* Pada server Skyblock, atur `target-server: "skyblock"` di `config.yml`.
-* Dengan begitu, pesanan yang ditujukan untuk Skyblock hanya akan dieksekusi saat pemain tersebut berada di server Skyblock, tidak akan salah masuk di server lain.
+### Command Admin (`/bb`)
+Permission: `bearbridge.admin` (atau OP).
 
----
+* `/bb` — Cek status plugin, koneksi DB, mode server, sama versi.
+* `/bb status` — Cek jumlah koneksi pool DB terus berapa antrian yang masih `PENDING`.
+* `/bb reload` — Reload semua file config (`config.yml`, `messages.yml`, `discordwebhook.yml`) + reconnect DB.
+* `/bb test <player> <command>` — Buat ngetes simulasi order masuk dari in game tanpa harus bayar lewat web.
+  Contoh: `/bb test VLADMXIV lp user %player% parent add vip`
+* `/bb retry <order_id>` — Kalau ada order yang statusnya `FAILED`, pake ini buat balikin ke `PENDING` biar dijalanin ulang.
+* `/bb retry all` — Balikin semua order `FAILED` di gamemode itu jadi `PENDING`.
+* `/bb update` — Gw udah pasangin fitur cek update juga. Jadi kalau sewaktu waktu ada fix bug atau update dari sisi plugin, bakal muncul notif di console terus di chat pas lu login. Tinggal ketik `/bb update`, nanti jar barunya kedownload ke `plugins/update/` terus otomatis keganti pas server restart.
 
-### 3.3. Daftar Perintah In-Game & Console (`/bb`)
-Semua sub-command admin membutuhkan permission: **`bearbridge.admin`** (atau status OP).
-Alias perintah: `/bearbridge`, `/bbridge`, `/bb`.
-
-| Perintah | Fungsi & Kegunaan |
-| :--- | :--- |
-| **`/bb`** | Menampilkan panel informasi utama BearBridge, status koneksi DB, jumlah pesanan tereksekusi, dan status versi plugin. |
-| **`/bb status`** | Menampilkan diagnostik langsung (*Live Diagnostics*) koneksi HikariCP (Active, Idle, Total) dan jumlah antrian `PENDING` saat ini. |
-| **`/bb reload`** | Memuat ulang `config.yml`, `messages.yml`, dan `discordwebhook.yml`, serta menghubungkan ulang koneksi database & timer antrian. |
-| **`/bb test <player> <cmd>`** | Menyuntikkan pesanan simulasi ke database untuk mengetes apakah alur antrian, efek in-game, broadcast, dan webhook berjalan lancar. <br>*Contoh:* `/bb test VLADMXIV eco give %player% 1000` |
-| **`/bb retry <order_id>`** | Mengubah status pesanan tertentu yang `FAILED` kembali menjadi `PENDING` agar dieksekusi ulang oleh sistem. <br>*Contoh:* `/bb retry 42` |
-| **`/bb retry all`** | Mengembalikan seluruh pesanan yang berstatus `FAILED` pada server node tersebut menjadi `PENDING` sekaligus. |
-| **`/bb update`** | Mengunduh pembaruan terbaru `BearBridge.jar` langsung dari GitHub Releases resmi ke folder `plugins/update/` (otomatis terpasang saat server restart). |
-
----
-
-### 3.4. Kustomisasi Pesan, Efek In-Game, & Discord Webhook
-
-1. **`plugins/BearBridge/messages.yml`**
-   * Mengatur pesan pribadi ke pembeli (**Chat**, **Title & Subtitle**, **Action Bar**, dan **Sound FX**) serta pengumuman **Global Broadcast** ke seluruh server.
-   * Mendukung format warna Legacy (`&a`, `&b`, `&l`) dan Hex Color (`&#00F5FF`).
-   * Placeholder yang didukung: `%player%`, `%order_id%`, `%rank%`, `%command%`.
-
-2. **`plugins/BearBridge/discordwebhook.yml`**
-   * Untuk mengaktifkan log transaksi ke Discord, ubah `features.discord-webhook: true` di `config.yml`, lalu masukkan URL Webhook Discord Anda pada bagian `webhook.url` di `discordwebhook.yml`.
-   * Mendukung placeholder dinamis `%player%`, `%order_id%`, `%target_server%`, `%server_mode%`, `%old_rank%`, `%new_rank%`, `%command%`, dan `%error%`.
-   * Secara bawaan, `avatar-url` dan `thumbnail-url` menggunakan `https://minotar.net/helm/%player%/128.png` sehingga gambar pada pesan Discord otomatis menampilkan kepala skin Minecraft pembeli.
-   * Bagian `footer.text` dan `footer.icon-url` juga dapat diubah bebas sesuai keinginan server.
-
----
-
-### 3.5. Cara Update Plugin (`/bb update`)
-Ketika Lead Developer (**Yonyon**) merilis perbaikan bug atau fitur baru:
-1. Anda akan melihat **notifikasi otomatis** di Console maupun di Chat saat Anda login ke dalam server (tanpa perlu mengecek website).
-2. Cukup klik tombol **`[/bb update]`** di chat atau ketik **`/bb update`**.
-3. Plugin akan mengunduh versi terbaru ke dalam folder `plugins/update/BearBridge.jar`.
-4. Lakukan **Restart Server** kapan pun Anda siap, dan Paper/Purpur akan otomatis mengganti plugin lama dengan versi terbaru.
+### File Config Lainnya
+* **`messages.yml`**: Buat ganti ganti teks notif ke player (chat, title layar, actionbar, sound) sama pengumuman broadcast satu server.
+* **`discordwebhook.yml`**: Kalau mau ada log transaksi masuk ke channel Discord, ubah `discord-webhook: true` di `config.yml`, tinggal tempel URL webhook Discord nya di `discordwebhook.yml`.
